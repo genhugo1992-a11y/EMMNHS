@@ -1,0 +1,1409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Eduardo M. Moreno National High School</title>
+<!-- ═══ FIREBASE SDK ═══ -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, addDoc, getDocs, deleteDoc, serverTimestamp, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ════════════════════════════════════════════════
+  // 🔧 PASTE YOUR FIREBASE CONFIG HERE
+  //    Get it from: Firebase Console → Project Settings → Your Apps
+  // ════════════════════════════════════════════════
+  const firebaseConfig = {
+    apiKey: "AIzaSyDg01eZt3io9p0jopcJD4LtvqF_4P5v3Ow",
+    authDomain: "emmns-portal.firebaseapp.com",
+    projectId: "emmns-portal",
+    storageBucket: "emmns-portal.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  // ── expose db + helpers to global scope so legacy JS can use them ──
+  window._db = db;
+  window._doc = doc;
+  window._getDoc = getDoc;
+  window._setDoc = setDoc;
+  window._updateDoc = updateDoc;
+  window._onSnapshot = onSnapshot;
+  window._collection = collection;
+  window._addDoc = addDoc;
+  window._getDocs = getDocs;
+  window._deleteDoc = deleteDoc;
+  window._serverTimestamp = serverTimestamp;
+  window._query = query;
+  window._orderBy = orderBy;
+
+  // ── LOAD STATE FROM FIRESTORE ON PAGE READY ──
+  window.addEventListener('DOMContentLoaded', async function(){
+    showLoadingOverlay(true);
+    try {
+      // 1. Load main state (adminCreds, teacherAccounts)
+      const stateSnap = await getDoc(doc(db, 'portalState', 'main'));
+      if(stateSnap.exists()){
+        const saved = stateSnap.data();
+        if(saved.adminCreds)      S.adminCreds      = saved.adminCreds;
+        if(saved.teacherAccounts) S.teacherAccounts = saved.teacherAccounts;
+      }
+
+      // 2. Load news
+      const newsSnap = await getDocs(query(collection(db,'news'), orderBy('createdAt','desc')));
+      if(!newsSnap.empty){
+        newsData.length = 0;
+        newsSnap.forEach(d => newsData.push({...d.data(), _id: d.id}));
+      }
+
+      // 3. Load collections into S
+      await loadCollection('leaveRequests');
+      await loadCollection('lessonPlans');
+      await loadCollection('dtrRecords');
+      await loadCollection('ipcrfRecords');
+      await loadCollection('bullyReports');
+
+      // 4. Load chat messages
+      const chatSnap = await getDocs(collection(db,'chatMessages'));
+      chatSnap.forEach(d => { S.chatMessages[d.id] = d.data().messages || []; });
+
+      // 5. Live listener for chat (real-time updates)
+      onSnapshot(collection(db,'chatMessages'), snap => {
+        snap.forEach(d => { S.chatMessages[d.id] = d.data().messages || []; });
+        if(S.currentTeacherUser) renderTeacherChat();
+        if(S.adminSelectedThread) renderAdminChat(S.adminSelectedThread);
+        renderAdminChatThreads();
+      });
+
+      // refresh UI
+      refreshNews();
+      if(document.getElementById('facultyGrid'))
+        document.getElementById('facultyGrid').innerHTML = facultyData.map(f =>
+          '<div class="faculty-card"><div class="faculty-avatar">'+f.init+'</div><h4>'+f.name+'</h4><p>'+f.role+'</p></div>'
+        ).join('');
+
+    } catch(e){
+      console.error('Firebase load error:', e);
+      showToast('⚠️ Could not connect to database. Check Firebase config.');
+    }
+    showLoadingOverlay(false);
+  });
+
+  async function loadCollection(name){
+    const snap = await getDocs(collection(db, name));
+    S[name].length = 0;
+    snap.forEach(d => S[name].push({...d.data(), _id: d.id}));
+  }
+
+  // ── SAVE HELPERS exposed globally ──
+  window.fbSaveState = async function(){
+    try {
+      await setDoc(doc(db,'portalState','main'), {
+        adminCreds: S.adminCreds,
+        teacherAccounts: S.teacherAccounts
+      });
+    } catch(e){ console.error('fbSaveState error:', e); }
+  };
+
+  window.fbAddRecord = async function(collName, record){
+    try {
+      const clean = JSON.parse(JSON.stringify(record)); // strip undefined
+      const ref = await addDoc(collection(db, collName), {...clean, createdAt: serverTimestamp()});
+      record._id = ref.id;
+    } catch(e){ console.error('fbAddRecord error:', e); showToast('⚠️ Save failed.'); }
+  };
+
+  window.fbUpdateRecord = async function(collName, id, fields){
+    try {
+      await updateDoc(doc(db, collName, id), fields);
+    } catch(e){ console.error('fbUpdateRecord error:', e); }
+  };
+
+  window.fbDeleteRecord = async function(collName, id){
+    try {
+      await deleteDoc(doc(db, collName, id));
+    } catch(e){ console.error('fbDeleteRecord error:', e); }
+  };
+
+  window.fbSaveNews = async function(){
+    // delete all then re-add (simple approach for small dataset)
+    try {
+      const snap = await getDocs(collection(db,'news'));
+      for(const d of snap.docs) await deleteDoc(doc(db,'news',d.id));
+      for(const n of newsData){
+        const {_id, ...data} = n;
+        await addDoc(collection(db,'news'), {...data, createdAt: serverTimestamp()});
+      }
+    } catch(e){ console.error('fbSaveNews error:', e); }
+  };
+
+  window.fbSaveChat = async function(threadUser){
+    try {
+      await setDoc(doc(db,'chatMessages', threadUser), {
+        messages: S.chatMessages[threadUser] || []
+      });
+    } catch(e){ console.error('fbSaveChat error:', e); }
+  };
+
+  function showLoadingOverlay(show){
+    var el = document.getElementById('fbLoadingOverlay');
+    if(el) el.style.display = show ? 'flex' : 'none';
+  }
+</script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--blue:#1a4fa0;--blue2:#2563c7;--yellow:#f5c518;--red:#d32f2f;--white:#fff;--gray:#f4f6fb;--dark:#1a2236}
+body{font-family:'Segoe UI',Arial,sans-serif;color:var(--dark);background:var(--gray)}
+nav{background:var(--blue);padding:0 1.2rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:200;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.logo-area{display:flex;align-items:center;gap:.6rem;padding:.45rem 0}
+.logo-area img{width:46px;height:46px;border-radius:50%;border:2px solid var(--yellow);object-fit:cover;background:#fff}
+.school-title{color:#fff;font-size:.76rem;font-weight:700;line-height:1.3}
+.school-title span{color:var(--yellow)}
+.nav-links{display:flex;gap:.12rem;flex-wrap:wrap}
+.nav-links button{background:none;border:none;color:#fff;padding:.4rem .6rem;border-radius:6px;cursor:pointer;font-size:.76rem;font-weight:600;transition:.2s}
+.nav-links button:hover,.nav-links button.active{background:var(--yellow);color:var(--blue)}
+.nav-burger{display:none;background:none;border:none;color:#fff;font-size:1.4rem;cursor:pointer}
+.page{display:none}.page.active{display:block}
+.hero{position:relative;min-height:460px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--blue)}
+.hero-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.45;z-index:0}
+.hero-bg-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.45;z-index:0}
+.hero-overlay{position:absolute;inset:0;background:linear-gradient(to bottom,rgba(26,79,160,.7),rgba(26,79,160,.5));z-index:1}
+.hero-content{position:relative;z-index:2;text-align:center;color:#fff;padding:2.5rem 1.5rem}
+.hero-logo{width:90px;height:90px;border-radius:50%;border:4px solid var(--yellow);object-fit:cover;margin-bottom:.9rem;background:#fff}
+.hero h1{font-size:clamp(1.2rem,3.5vw,2rem);font-weight:900;line-height:1.2;margin-bottom:.4rem}
+.hero h1 span{color:var(--yellow)}
+.hero p{font-size:.88rem;opacity:.9;margin-bottom:1.4rem}
+.hero-btns{display:flex;flex-wrap:wrap;gap:.6rem;justify-content:center}
+.btn{padding:.5rem 1.1rem;border-radius:8px;border:none;cursor:pointer;font-size:.82rem;font-weight:700;transition:.2s;display:inline-flex;align-items:center;gap:.35rem}
+.btn-yellow{background:var(--yellow);color:var(--blue)}.btn-yellow:hover{background:#e6b800}
+.btn-white{background:#fff;color:var(--blue)}.btn-white:hover{background:#e8f0ff}
+.btn-red{background:var(--red);color:#fff;animation:pulse 2s infinite}.btn-red:hover{background:#b71c1c}
+.btn-blue{background:var(--blue);color:#fff}.btn-blue:hover{background:var(--blue2)}
+.btn-green{background:#059669;color:#fff}.btn-green:hover{background:#047857}
+.btn-gray{background:#e5e7eb;color:#374151}.btn-gray:hover{background:#d1d5db}
+.btn-sm{padding:.27rem .62rem;font-size:.72rem}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(211,47,47,.5)}50%{box-shadow:0 0 0 8px rgba(211,47,47,0)}}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.8rem;padding:1rem 1.5rem;background:#fff;border-bottom:3px solid var(--yellow)}
+.stat-card{text-align:center;padding:.35rem}
+.stat-card .num{font-size:1.6rem;font-weight:900;color:var(--blue)}
+.stat-card .lbl{font-size:.72rem;color:#666;font-weight:600}
+.section{padding:1.5rem}
+.section-title{font-size:1.05rem;font-weight:900;color:var(--blue);border-left:4px solid var(--yellow);padding-left:.7rem;margin-bottom:.9rem;display:flex;align-items:center;justify-content:space-between}
+.cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:.85rem}
+.news-card{background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);transition:.2s}
+.news-card:hover{transform:translateY(-3px);box-shadow:0 6px 16px rgba(0,0,0,.12)}
+.card-img{height:110px;background:linear-gradient(135deg,#e8f0ff,#dbeafe);display:flex;align-items:center;justify-content:center;font-size:2rem}
+.card-body{padding:.8rem}
+.tag{display:inline-block;padding:.14rem .48rem;border-radius:20px;font-size:.63rem;font-weight:700;margin-bottom:.3rem}
+.tag-news{background:#dbeafe;color:#1a4fa0}.tag-event{background:#fef9c3;color:#92400e}.tag-announce{background:#fce7f3;color:#9d174d}
+.card-body h3{font-size:.84rem;font-weight:700;margin-bottom:.28rem}
+.card-body p{font-size:.76rem;color:#555;line-height:1.5}
+.card-date{font-size:.68rem;color:#888;margin-top:.3rem}
+.about-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+.about-box{background:#fff;border-radius:10px;padding:1rem;box-shadow:0 2px 8px rgba(0,0,0,.07)}
+.about-box h3{color:var(--blue);font-size:.88rem;font-weight:800;margin-bottom:.42rem}
+.about-box p,.about-box li{font-size:.8rem;color:#444;line-height:1.7}
+.about-box ul{padding-left:1.1rem}
+.faculty-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:.85rem;margin-top:.5rem}
+.faculty-card{background:#fff;border-radius:10px;padding:.8rem;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.07)}
+.faculty-avatar{width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--blue2));display:flex;align-items:center;justify-content:center;color:#fff;font-size:1.1rem;font-weight:800;margin:0 auto .42rem}
+.faculty-card h4{font-size:.76rem;font-weight:700}
+.faculty-card p{font-size:.68rem;color:#777}
+.calendar-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;background:#e5e7eb;border-radius:8px;overflow:hidden}
+.cal-header{background:var(--blue);color:#fff;text-align:center;padding:.36rem;font-size:.68rem;font-weight:700}
+.cal-day{background:#fff;text-align:center;padding:.4rem .12rem;font-size:.74rem;min-height:42px;cursor:pointer}
+.cal-day:hover{background:#f0f4ff}.cal-day.today{background:#fef9c3;font-weight:700}
+.cal-day.has-event::after{content:'';width:5px;height:5px;background:var(--red);border-radius:50%;display:block;margin:.1rem auto 0}
+.cal-day.empty{background:#f9fafb;cursor:default}
+.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:.7rem}
+.gallery-img{height:120px;border-radius:8px;background:linear-gradient(135deg,#e8f0ff,#dbeafe);display:flex;align-items:center;justify-content:center;font-size:2rem;cursor:pointer}
+label{display:block;font-size:.78rem;font-weight:700;color:var(--blue);margin-bottom:.26rem}
+input,select,textarea{width:100%;padding:.46rem .66rem;border:1.5px solid #d1d5db;border-radius:7px;font-size:.83rem;transition:.2s;font-family:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--blue2);box-shadow:0 0 0 3px rgba(37,99,199,.1)}
+textarea{resize:vertical;min-height:70px}
+.form-row{margin-bottom:.8rem}
+.login-wrap{display:flex;justify-content:center;align-items:center;min-height:60vh;padding:2rem}
+.login-box{background:#fff;border-radius:14px;padding:1.7rem;width:100%;max-width:355px;box-shadow:0 4px 20px rgba(0,0,0,.1);text-align:center}
+.login-tabs{display:flex;border-radius:8px;overflow:hidden;margin-bottom:1rem;border:2px solid var(--blue)}
+.login-tab{flex:1;padding:.4rem;border:none;cursor:pointer;font-weight:700;font-size:.78rem;background:#fff;color:var(--blue)}
+.login-tab.active{background:var(--blue);color:#fff}
+.portal-layout{display:flex;min-height:80vh}
+.sidebar{width:195px;background:var(--blue);padding:.8rem;flex-shrink:0}
+.sidebar h3{color:var(--yellow);font-size:.74rem;padding:.36rem;margin-bottom:.36rem;border-bottom:1px solid rgba(255,255,255,.2)}
+.sidebar-btn{display:block;width:100%;text-align:left;padding:.52rem .78rem;background:none;border:none;color:#fff;border-radius:7px;cursor:pointer;font-size:.76rem;font-weight:600;margin-bottom:.16rem;transition:.2s}
+.sidebar-btn:hover,.sidebar-btn.active{background:rgba(255,255,255,.18)}
+.portal-content{flex:1;padding:1.2rem;overflow-x:auto}
+.portal-card{background:#fff;border-radius:10px;padding:1.2rem;box-shadow:0 2px 8px rgba(0,0,0,.08);margin-bottom:.85rem}
+.portal-card h3{color:var(--blue);margin-bottom:.85rem;font-size:.92rem}
+table{width:100%;border-collapse:collapse;font-size:.76rem}
+th{background:var(--blue);color:#fff;padding:.48rem .68rem;text-align:left;white-space:nowrap}
+td{padding:.48rem .68rem;border-bottom:1px solid #e5e7eb;vertical-align:middle}
+tr:hover td{background:#f0f4ff}
+.status-badge{padding:.14rem .52rem;border-radius:20px;font-size:.68rem;font-weight:700}
+.status-pending{background:#fef9c3;color:#92400e}
+.status-approved{background:#d1fae5;color:#065f46}
+.status-rejected{background:#fee2e2;color:#991b1b}
+.status-resolved{background:#d1fae5;color:#065f46}
+.edit-section{background:#fff;border-radius:10px;padding:1.2rem;margin-bottom:.85rem;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.edit-section h3{color:var(--blue);margin-bottom:.85rem;font-size:.92rem;border-bottom:2px solid var(--yellow);padding-bottom:.42rem}
+.news-admin-item{background:#f8faff;border:1px solid #e5e7eb;border-radius:8px;padding:.72rem;margin-bottom:.52rem;display:flex;align-items:flex-start;justify-content:space-between;gap:.5rem}
+.news-admin-item .ni-info b{font-size:.8rem}
+.news-admin-item .ni-info p{font-size:.73rem;color:#666;margin-top:.14rem}
+.forms-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:.9rem}
+.form-card{background:#fff;border-radius:10px;padding:1rem;box-shadow:0 2px 8px rgba(0,0,0,.08);transition:.2s;border-top:4px solid var(--blue)}
+.form-card:hover{transform:translateY(-2px);box-shadow:0 5px 14px rgba(0,0,0,.12)}
+.form-card .fc-icon{font-size:1.8rem;margin-bottom:.45rem}
+.form-card h4{font-size:.84rem;font-weight:800;margin-bottom:.28rem}
+.form-card p{font-size:.74rem;color:#666;line-height:1.5;margin-bottom:.65rem}
+.form-card .fc-meta{font-size:.68rem;color:#888;margin-bottom:.6rem}
+/* DTR / IPCRF upload info box */
+.upload-info-box{background:#f0f4ff;border:1.5px dashed var(--blue2);border-radius:10px;padding:1.2rem;text-align:center;margin-bottom:1rem}
+.upload-info-box .uib-icon{font-size:2.5rem;margin-bottom:.5rem}
+.upload-info-box h4{font-size:.9rem;font-weight:800;color:var(--blue);margin-bottom:.35rem}
+.upload-info-box p{font-size:.78rem;color:#555;line-height:1.6;margin-bottom:.75rem}
+.upload-info-box .format-badges{display:flex;gap:.4rem;justify-content:center;flex-wrap:wrap;margin-bottom:.75rem}
+.format-badge{background:var(--blue);color:#fff;border-radius:6px;padding:.2rem .6rem;font-size:.7rem;font-weight:700}
+.format-badge.xlsx{background:#1d7044}
+.format-badge.pdf{background:#c0392b}
+.ipcrf-kra{display:grid;grid-template-columns:2.5fr 1fr 1fr 1fr;gap:.4rem;margin-bottom:.4rem;align-items:center;font-size:.76rem}
+.ipcrf-kra-header{font-weight:700;color:#555;font-size:.68rem;padding-bottom:.25rem;border-bottom:1px solid #e5e7eb;margin-bottom:.3rem}
+/* CHAT */
+.chat-wrap{display:flex;flex-direction:column;height:450px;max-height:62vh}
+.chat-header{background:var(--blue);color:#fff;padding:.62rem 1rem;border-radius:10px 10px 0 0;display:flex;align-items:center;gap:.5rem;font-weight:700;font-size:.84rem}
+.chat-header .online-dot{width:7px;height:7px;background:#4ade80;border-radius:50%}
+.chat-messages{flex:1;overflow-y:auto;padding:.85rem;background:#f8faff;border:1px solid #e5e7eb;display:flex;flex-direction:column;gap:.55rem}
+.msg{max-width:75%;padding:.52rem .82rem;border-radius:10px;font-size:.8rem;line-height:1.5;word-break:break-word}
+.msg.me{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:3px}
+.msg.other{align-self:flex-start;background:#fff;border:1px solid #e5e7eb;border-bottom-left-radius:3px}
+.msg .msg-meta{font-size:.63rem;opacity:.7;margin-top:.18rem}
+.msg.me .msg-meta{text-align:right}
+.chat-input-row{display:flex;gap:.45rem;padding:.6rem;background:#fff;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 10px 10px}
+.chat-input-row input{flex:1;border-radius:20px;padding:.42rem .85rem;font-size:.82rem}
+.chat-input-row button{border-radius:20px;padding:.42rem .95rem;font-size:.8rem}
+.chat-threads{border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:.9rem}
+.chat-thread-item{padding:.7rem .9rem;display:flex;align-items:center;gap:.7rem;cursor:pointer;border-bottom:1px solid #f0f0f0;transition:.15s}
+.chat-thread-item:hover{background:#f0f4ff}
+.chat-thread-item.active{background:#e8f0ff}
+.chat-thread-avatar{width:36px;height:36px;border-radius:50%;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.8rem;flex-shrink:0}
+.chat-thread-info{flex:1;min-width:0}
+.chat-thread-info .tname{font-size:.82rem;font-weight:700}
+.chat-thread-info .tlast{font-size:.72rem;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.unread-badge{background:var(--red);color:#fff;border-radius:50%;width:17px;height:17px;display:flex;align-items:center;justify-content:center;font-size:.63rem;font-weight:700;flex-shrink:0}
+.teacher-row{display:flex;align-items:center;gap:.7rem;background:#f8faff;border:1px solid #e5e7eb;border-radius:8px;padding:.65rem .85rem;margin-bottom:.5rem}
+.teacher-row .tr-avatar{width:34px;height:34px;border-radius:50%;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.78rem;flex-shrink:0}
+.teacher-row .tr-info{flex:1}
+.teacher-row .tr-info b{font-size:.82rem}
+.teacher-row .tr-info span{font-size:.72rem;color:#666;display:block}
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;align-items:center;justify-content:center}
+.modal-bg.open{display:flex}
+.modal{background:#fff;border-radius:14px;padding:1.7rem;max-width:520px;width:92%;max-height:92vh;overflow-y:auto;position:relative}
+.modal h2{color:var(--blue);margin-bottom:.82rem;font-size:1.05rem}
+.modal-close{position:absolute;top:.65rem;right:.65rem;background:none;border:none;font-size:1.2rem;cursor:pointer;color:#888}
+.view-field{display:flex;gap:.5rem;border-bottom:1px solid #f0f0f0;padding:.36rem 0;font-size:.82rem}
+.view-field .vf-label{font-weight:700;color:var(--blue);min-width:115px;flex-shrink:0}
+.contact-form{background:#fff;border-radius:10px;padding:1.2rem;max-width:500px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.toast{position:fixed;bottom:1.5rem;right:1.5rem;background:var(--blue);color:#fff;padding:.72rem 1.1rem;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.2);z-index:999;font-size:.83rem;transform:translateY(100px);opacity:0;transition:.3s}
+.toast.show{transform:translateY(0);opacity:1}
+@media(max-width:700px){
+.stats{grid-template-columns:repeat(2,1fr)}
+.about-grid{grid-template-columns:1fr}
+.portal-layout{flex-direction:column}
+.sidebar{width:100%;display:flex;flex-wrap:wrap;gap:.18rem;padding:.42rem}
+.sidebar h3{display:none}
+.nav-links{display:none}.nav-links.open{display:flex;flex-direction:column;position:absolute;top:54px;right:0;background:var(--blue);width:175px;padding:.42rem;border-radius:0 0 0 10px;z-index:99}
+.nav-burger{display:block}
+}
+</style>
+</head>
+<body>
+
+<!-- Firebase loading overlay -->
+<div id="fbLoadingOverlay" style="display:none;position:fixed;inset:0;background:rgba(26,79,160,.92);z-index:9999;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:'Segoe UI',Arial,sans-serif">
+  <div style="font-size:2.5rem;margin-bottom:.8rem;animation:spin 1s linear infinite">🔄</div>
+  <div style="font-size:1rem;font-weight:700">Connecting to database…</div>
+  <div style="font-size:.8rem;opacity:.7;margin-top:.3rem">Eduardo M. Moreno NHS Portal</div>
+</div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+
+<nav>
+  <div class="logo-area">
+    <img id="navLogo" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%231a4fa0'/%3E%3Ctext x='50' y='62' text-anchor='middle' fill='%23f5c518' font-size='28' font-weight='900' font-family='Arial'%3EEM%3C/text%3E%3C/svg%3E" alt="Logo"/>
+    <div class="school-title">Eduardo M. Moreno<br><span>National High School</span><br><span style="color:#cce;font-size:.68rem;font-weight:400">Division of Romblon</span></div>
+  </div>
+  <div class="nav-links" id="navLinks">
+    <button class="active" onclick="goPage('home',this)">🏠 Home</button>
+    <button onclick="goPage('news',this)">📰 News</button>
+    <button onclick="goPage('about',this)">🏛️ About</button>
+    <button onclick="goPage('calendar',this)">📅 Calendar</button>
+    <button onclick="goPage('forms',this)">📋 DepEd Forms</button>
+    <button onclick="goPage('contact',this)">📬 Contact</button>
+    <button onclick="goPage('portal',this)">👩‍🏫 Portal</button>
+  </div>
+  <button class="nav-burger" onclick="toggleNav()">☰</button>
+</nav>
+
+<!-- HOME -->
+<div class="page active" id="page-home">
+  <div class="hero" id="heroBanner">
+    <div class="hero-overlay" id="heroOverlay"></div>
+    <div class="hero-content">
+      <img class="hero-logo" id="heroLogo" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%231a4fa0'/%3E%3Ctext x='50' y='62' text-anchor='middle' fill='%23f5c518' font-size='28' font-weight='900' font-family='Arial'%3EEM%3C/text%3E%3C/svg%3E" alt="Logo"/>
+      <h1>Eduardo M. Moreno<br><span>National High School</span></h1>
+      <p id="heroSubtitle">Shaping Tomorrow's Leaders Today | Binonga-an, San Agustin, Romblon</p>
+      <div class="hero-btns">
+        <button class="btn btn-yellow" onclick="goPage('news',document.querySelectorAll('.nav-links button')[1])">📰 Latest News</button>
+        <button class="btn btn-white" onclick="goPage('forms',document.querySelectorAll('.nav-links button')[4])">📋 DepEd Forms</button>
+        <button class="btn btn-white" onclick="goPage('portal',document.querySelectorAll('.nav-links button')[6])">👩‍🏫 Teacher Portal</button>
+        <button class="btn btn-red" onclick="openBullyModal()">🚨 Report Bullying</button>
+      </div>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat-card"><div class="num" id="statStudents">2,400+</div><div class="lbl">👩‍🎓 Students</div></div>
+    <div class="stat-card"><div class="num" id="statFaculty">98</div><div class="lbl">👨‍🏫 Faculty</div></div>
+    <div class="stat-card"><div class="num" id="statRooms">42</div><div class="lbl">🏫 Classrooms</div></div>
+    <div class="stat-card"><div class="num" id="statAwards">15</div><div class="lbl">🏆 Awards</div></div>
+  </div>
+  <div class="section">
+    <div class="section-title">Latest News & Announcements</div>
+    <div class="cards-grid" id="homeNewsCards"></div>
+  </div>
+</div>
+
+<!-- NEWS -->
+<div class="page" id="page-news">
+  <div class="section">
+    <div class="section-title">📰 News, Events & Announcements</div>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.85rem">
+      <button class="btn btn-yellow btn-sm" onclick="filterNews('all')">All</button>
+      <button class="btn btn-sm" style="background:#dbeafe;color:#1a4fa0" onclick="filterNews('News')">News</button>
+      <button class="btn btn-sm" style="background:#fef9c3;color:#92400e" onclick="filterNews('Event')">Events</button>
+      <button class="btn btn-sm" style="background:#fce7f3;color:#9d174d" onclick="filterNews('Announcement')">Announcements</button>
+    </div>
+    <div class="cards-grid" id="allNewsCards"></div>
+  </div>
+  <div class="section" style="padding-top:0">
+    <div class="section-title">📸 Photo Gallery</div>
+    <div class="gallery-grid">
+      <div class="gallery-img">🎓</div><div class="gallery-img">🏅</div><div class="gallery-img">📚</div><div class="gallery-img">🎭</div>
+      <div class="gallery-img">⚽</div><div class="gallery-img">🏫</div><div class="gallery-img">🎨</div><div class="gallery-img">🎤</div>
+    </div>
+  </div>
+</div>
+
+<!-- ABOUT -->
+<div class="page" id="page-about">
+  <div class="section">
+    <div class="section-title">🏛️ About Our School</div>
+    <div class="about-grid">
+      <div class="about-box"><h3>🎯 Mission</h3><p id="txtMission">To provide quality, equitable, culture-based, and complete basic education where every Filipino is functionally literate, equipped with 21st century skills, and prepared for life-long learning, middle-level skills development, entrepreneurship, or higher education.</p></div>
+      <div class="about-box"><h3>🌟 Vision</h3><p id="txtVision">We dream of Filipinos who passionately love their country and whose values and competencies enable them to realize their full potential and contribute meaningfully to building the nation.</p></div>
+      <div class="about-box"><h3>📖 History</h3><p id="txtHistory">Eduardo M. Moreno National High School was established in 2006 in Binonga-an, San Agustin, Romblon under the Division of Romblon (School ID: 309204).</p></div>
+      <div class="about-box"><h3>💎 Core Values</h3><ul><li>Maka-Diyos</li><li>Maka-tao</li><li>Makakalikasan</li><li>Makabansa</li><li>Excellence & Integrity</li><li>Community Service</li></ul></div>
+      <div class="about-box"><h3>📞 Contact Info</h3><p id="txtContact">📍 Binonga-an, San Agustin, Romblon<br>📞 (042) 000-0000<br>📧 emmnshs@deped.gov.ph<br>🆔 School ID: 309204</p></div>
+      <div class="about-box"><h3>🕐 Office Hours</h3><p id="txtHours">Monday – Friday<br>7:00 AM – 5:00 PM<br><br>Enrollment: As per DepEd calendar</p></div>
+    </div>
+    <div class="section-title" style="margin-top:1.6rem">👨‍🏫 Faculty Members</div>
+    <div class="faculty-grid" id="facultyGrid"></div>
+  </div>
+</div>
+
+<!-- CALENDAR -->
+<div class="page" id="page-calendar">
+  <div class="section">
+    <div class="section-title">📅 School Calendar — June 2026</div>
+    <div style="background:#fff;border-radius:10px;padding:1rem;box-shadow:0 2px 8px rgba(0,0,0,.08)">
+      <div class="calendar-grid">
+        <div class="cal-header">Sun</div><div class="cal-header">Mon</div><div class="cal-header">Tue</div><div class="cal-header">Wed</div><div class="cal-header">Thu</div><div class="cal-header">Fri</div><div class="cal-header">Sat</div>
+        <div class="cal-day empty"></div><div class="cal-day">1</div><div class="cal-day">2</div><div class="cal-day">3</div><div class="cal-day">4</div><div class="cal-day has-event">5</div><div class="cal-day">6</div>
+        <div class="cal-day">7</div><div class="cal-day has-event">8</div><div class="cal-day">9</div><div class="cal-day">10</div><div class="cal-day">11</div><div class="cal-day has-event">12</div><div class="cal-day">13</div>
+        <div class="cal-day">14</div><div class="cal-day">15</div><div class="cal-day has-event">16</div><div class="cal-day">17</div><div class="cal-day">18</div><div class="cal-day">19</div><div class="cal-day">20</div>
+        <div class="cal-day">21</div><div class="cal-day">22</div><div class="cal-day today">23</div><div class="cal-day">24</div><div class="cal-day has-event">25</div><div class="cal-day">26</div><div class="cal-day">27</div>
+        <div class="cal-day">28</div><div class="cal-day has-event">29</div><div class="cal-day">30</div><div class="cal-day empty"></div><div class="cal-day empty"></div><div class="cal-day empty"></div><div class="cal-day empty"></div>
+      </div>
+      <div style="margin-top:.85rem">
+        <div class="section-title">Upcoming Events</div>
+        <div style="display:flex;flex-direction:column;gap:.45rem">
+          <div style="background:#f0f4ff;border-left:4px solid var(--blue);padding:.62rem;border-radius:0 8px 8px 0"><strong>June 5</strong> — Foundation Day 🎉</div>
+          <div style="background:#fef9c3;border-left:4px solid var(--yellow);padding:.62rem;border-radius:0 8px 8px 0"><strong>June 8</strong> — PTA Assembly 👨‍👩‍👧</div>
+          <div style="background:#fce7f3;border-left:4px solid #e91e8c;padding:.62rem;border-radius:0 8px 8px 0"><strong>June 12</strong> — Independence Day 🇵🇭</div>
+          <div style="background:#f0f4ff;border-left:4px solid var(--blue);padding:.62rem;border-radius:0 8px 8px 0"><strong>June 16</strong> — Quarterly Exam Week 📝</div>
+          <div style="background:#fef9c3;border-left:4px solid var(--yellow);padding:.62rem;border-radius:0 8px 8px 0"><strong>June 25</strong> — Science Fair 🔬</div>
+          <div style="background:#d1fae5;border-left:4px solid #065f46;padding:.62rem;border-radius:0 8px 8px 0"><strong>June 29</strong> — Recognition Day 🏆</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DEPED FORMS -->
+<div class="page" id="page-forms">
+  <div class="section">
+    <div class="section-title">📋 DepEd Official Forms</div>
+    <p style="font-size:.82rem;color:#555;margin-bottom:1.1rem">Download official DepEd forms for school operations, personnel, and student records.</p>
+    <div id="formsGrid" class="forms-grid"></div>
+  </div>
+</div>
+
+<!-- CONTACT -->
+<div class="page" id="page-contact">
+  <div class="section">
+    <div class="section-title">📬 Contact Us</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem">
+      <div class="contact-form">
+        <h3 style="color:var(--blue);margin-bottom:.85rem">Send a Message</h3>
+        <div class="form-row"><label>Your Name</label><input type="text" placeholder="Juan dela Cruz"/></div>
+        <div class="form-row"><label>Email</label><input type="email" placeholder="juan@email.com"/></div>
+        <div class="form-row"><label>Subject</label><select><option>General Inquiry</option><option>Enrollment</option><option>Student Concern</option><option>Bullying Report</option><option>Other</option></select></div>
+        <div class="form-row"><label>Message</label><textarea placeholder="Type your message here..."></textarea></div>
+        <button class="btn btn-yellow" style="width:100%" onclick="showToast('Message sent! We will get back to you soon.')">📤 Send Message</button>
+      </div>
+      <div>
+        <div class="about-box" style="margin-bottom:.85rem"><h3>📞 Get In Touch</h3><p>📍 Binonga-an, San Agustin, Romblon<br><br>📞 (042) 000-0000<br>📧 emmnshs@deped.gov.ph<br><br>🕐 Mon–Fri: 7:00 AM – 5:00 PM</p></div>
+        <div class="about-box"><h3>🚨 Bullying Hotline</h3><p>CPO: 📞 <strong>(042) 000-1111</strong></p></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PORTAL -->
+<div class="page" id="page-portal">
+  <!-- LOGIN -->
+  <div id="portalLogin" class="login-wrap">
+    <div class="login-box">
+      <img id="loginLogo" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%231a4fa0'/%3E%3Ctext x='50' y='62' text-anchor='middle' fill='%23f5c518' font-size='28' font-weight='900' font-family='Arial'%3EEM%3C/text%3E%3C/svg%3E" style="width:66px;height:66px;border-radius:50%;border:3px solid var(--yellow);margin-bottom:.65rem"/>
+      <h2 style="color:var(--blue);margin-bottom:.18rem;font-size:1.1rem">Staff Portal</h2>
+      <p style="font-size:.76rem;color:#666;margin-bottom:.85rem">Authorized personnel only</p>
+      <div class="login-tabs">
+        <button class="login-tab active" id="tabTeacher" onclick="switchLoginTab('teacher')">👩‍🏫 Teacher</button>
+        <button class="login-tab" id="tabAdmin" onclick="switchLoginTab('admin')">🏫 Admin</button>
+      </div>
+      <div class="form-row"><label>Username</label><input type="text" id="loginUser" placeholder="Username"/></div>
+      <div class="form-row"><label>Password</label><input type="password" id="loginPass" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()"/></div>
+      <div id="loginError" style="color:var(--red);font-size:.76rem;margin-bottom:.42rem;display:none">❌ Invalid credentials. Please try again.</div>
+      <button class="btn btn-yellow" style="width:100%;margin-top:.3rem" onclick="doLogin()">🔓 Login</button>
+    </div>
+  </div>
+
+  <!-- TEACHER PORTAL -->
+  <div id="portalTeacher" style="display:none">
+    <div class="portal-layout">
+      <div class="sidebar">
+        <h3>👩‍🏫 TEACHER</h3>
+        <button class="sidebar-btn active" onclick="portalTab('pUpload',this)">📁 Lesson Plan</button>
+        <button class="sidebar-btn" onclick="portalTab('pLeave',this)">📝 File Leave</button>
+        <button class="sidebar-btn" onclick="portalTab('pMyLeaves',this)">📋 My Leaves</button>
+        <button class="sidebar-btn" onclick="portalTab('pDTR',this)">🕐 DTR Submission</button>
+        <button class="sidebar-btn" onclick="portalTab('pIPCRF',this)">📊 IPCRF</button>
+        <button class="sidebar-btn" onclick="portalTab('pChat',this)">💬 Chat Admin</button>
+        <button class="sidebar-btn" style="margin-top:1.5rem;color:#fca5a5" onclick="doLogout()">🚪 Logout</button>
+      </div>
+      <div class="portal-content">
+        <!-- LESSON PLAN -->
+        <div id="pUpload" class="portal-section">
+          <div class="portal-card">
+            <h3>📁 Upload Lesson Plan</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem">
+              <div class="form-row"><label>Subject</label><input type="text" id="lpSubject" placeholder="e.g. Mathematics"/></div>
+              <div class="form-row"><label>Grade Level</label><select id="lpGrade"><option>Grade 7</option><option>Grade 8</option><option>Grade 9</option><option>Grade 10</option><option>Grade 11</option><option>Grade 12</option></select></div>
+              <div class="form-row"><label>Section</label><input type="text" id="lpSection" placeholder="e.g. Rizal"/></div>
+              <div class="form-row"><label>Quarter</label><select id="lpQuarter"><option>Q1</option><option>Q2</option><option>Q3</option><option>Q4</option></select></div>
+              <div class="form-row"><label>Week</label><select id="lpWeek"></select></div>
+              <div class="form-row"><label>Topic</label><input type="text" id="lpTopic" placeholder="Lesson topic"/></div>
+            </div>
+            <div class="form-row"><label>Upload File (PDF/DOCX)</label><input type="file" id="lpFile" accept=".pdf,.doc,.docx"/></div>
+            <button class="btn btn-yellow" onclick="submitLessonPlan()">📤 Submit</button>
+          </div>
+          <div class="portal-card">
+            <h3>📂 My Uploaded Plans</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>Subject</th><th>Grade</th><th>Section</th><th>Quarter</th><th>Week</th><th>Topic</th><th>Date</th></tr></thead><tbody id="myPlansBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- LEAVE -->
+        <div id="pLeave" class="portal-section" style="display:none">
+          <div class="portal-card">
+            <h3>📝 File a Leave Request</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem">
+              <div class="form-row"><label>Leave Category</label><select id="leaveCategory"><option value="Official">🏛️ Official Leave</option><option value="Local">📍 Local Leave</option></select></div>
+              <div class="form-row"><label>Leave Type</label><select id="leaveType"><option>Sick Leave</option><option>Vacation Leave</option><option>Emergency Leave</option><option>Maternity/Paternity Leave</option><option>Special Leave</option></select></div>
+              <div class="form-row"><label>Date From</label><input type="date" id="leaveFrom"/></div>
+              <div class="form-row"><label>Date To</label><input type="date" id="leaveTo"/></div>
+            </div>
+            <div class="form-row"><label>Reason</label><textarea id="leaveReason" placeholder="State your reason..."></textarea></div>
+            <div class="form-row"><label>Supporting Document (Optional)</label><input type="file" id="leaveFile" accept=".pdf,.jpg,.png"/></div>
+            <button class="btn btn-yellow" onclick="submitLeave()">📤 Submit</button>
+          </div>
+        </div>
+        <!-- MY LEAVES -->
+        <div id="pMyLeaves" class="portal-section" style="display:none">
+          <div class="portal-card">
+            <h3>📋 My Leave Requests</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Category</th><th>From</th><th>To</th><th>Reason</th><th>Document</th><th>Status</th></tr></thead><tbody id="myLeavesBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- DTR -->
+        <div id="pDTR" class="portal-section" style="display:none">
+          <div class="portal-card">
+            <h3>🕐 Daily Time Record (DTR) Submission</h3>
+            <div class="upload-info-box">
+              <div class="uib-icon">🕐</div>
+              <h4>Submit Your DTR</h4>
+              <p>Upload your completed and supervisor-signed Daily Time Record.<br>Use the official DepEd CS Form No. 48 template.</p>
+              <div class="format-badges">
+                <span class="format-badge xlsx">📊 XLSX / XLS</span>
+                <span class="format-badge pdf">📄 PDF</span>
+              </div>
+              <p style="font-size:.74rem;color:#888">Maximum file size: 10MB</p>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.75rem">
+              <div class="form-row"><label>Month</label><select id="dtrMonth"><option>January</option><option>February</option><option>March</option><option>April</option><option>May</option><option selected>June</option><option>July</option><option>August</option><option>September</option><option>October</option><option>November</option><option>December</option></select></div>
+              <div class="form-row"><label>Year</label><input type="number" id="dtrYear" value="2026" min="2020" max="2030"/></div>
+              <div class="form-row"><label>Remarks (Optional)</label><input type="text" id="dtrRemarks" placeholder="e.g. Absent Day 5"/></div>
+            </div>
+            <div class="form-row"><label>Upload DTR File <span style="color:var(--red)">*</span></label><input type="file" id="dtrFile" accept=".pdf,.xls,.xlsx"/></div>
+            <div style="background:#fef9c3;border-left:3px solid var(--yellow);padding:.65rem;border-radius:0 8px 8px 0;font-size:.78rem;margin-bottom:.85rem">
+              <strong>📌 Reminder:</strong> Make sure your DTR is signed by your immediate supervisor before uploading. Unsigned DTRs will not be accepted.
+            </div>
+            <button class="btn btn-yellow" onclick="submitDTR()">📤 Submit DTR</button>
+          </div>
+          <div class="portal-card">
+            <h3>📂 My Submitted DTRs</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>Month</th><th>Year</th><th>Remarks</th><th>File</th><th>Submitted</th><th>Status</th></tr></thead><tbody id="myDTRBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- IPCRF -->
+        <div id="pIPCRF" class="portal-section" style="display:none">
+          <div class="portal-card">
+            <h3>📊 IPCRF Submission</h3>
+            <div class="upload-info-box">
+              <div class="uib-icon">📊</div>
+              <h4>Individual Performance Commitment and Review Form</h4>
+              <p>Upload your accomplished IPCRF using the official DepEd template.<br>Ensure all KRAs are filled and the form is duly signed.</p>
+              <div class="format-badges">
+                <span class="format-badge xlsx">📊 XLSX / XLS</span>
+                <span class="format-badge pdf">📄 PDF</span>
+              </div>
+              <p style="font-size:.74rem;color:#888">Maximum file size: 10MB</p>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem">
+              <div class="form-row"><label>School Year</label><input type="text" id="iSY" value="2025-2026" placeholder="e.g. 2025-2026"/></div>
+              <div class="form-row"><label>Rating Period</label><select id="iRating"><option>Mid-Year (January–June)</option><option>End-of-Year (July–December)</option><option>Full Year</option></select></div>
+              <div class="form-row"><label>Position / Designation</label><input type="text" id="iPosition" placeholder="e.g. Teacher I"/></div>
+              <div class="form-row"><label>School / Station</label><input type="text" id="iStation" value="Eduardo M. Moreno NHS"/></div>
+            </div>
+            <div class="form-row"><label>Upload IPCRF File <span style="color:var(--red)">*</span></label><input type="file" id="iFile" accept=".pdf,.xls,.xlsx"/></div>
+            <div class="form-row"><label>Remarks / Notes (Optional)</label><textarea id="iRemarks" rows="2" placeholder="Additional remarks or notes..."></textarea></div>
+            <div style="background:#fef9c3;border-left:3px solid var(--yellow);padding:.65rem;border-radius:0 8px 8px 0;font-size:.78rem;margin-bottom:.85rem">
+              <strong>📌 Reminder:</strong> Upload the accomplished IPCRF in <strong>Excel (.xlsx)</strong> or <strong>PDF</strong> format only. Both the employee and rater signatures must be present.
+            </div>
+            <button class="btn btn-yellow" onclick="submitIPCRF()">📤 Submit IPCRF</button>
+          </div>
+          <div class="portal-card">
+            <h3>📂 My Submitted IPCRFs</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>School Year</th><th>Period</th><th>Position</th><th>File</th><th>Submitted</th><th>Status</th></tr></thead><tbody id="myIPCRFBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- CHAT -->
+        <div id="pChat" class="portal-section" style="display:none">
+          <div class="portal-card" style="padding:0;overflow:hidden">
+            <div class="chat-wrap">
+              <div class="chat-header"><div class="online-dot"></div> Chat with Admin</div>
+              <div class="chat-messages" id="teacherChatMessages"></div>
+              <div class="chat-input-row">
+                <input type="text" id="teacherChatInput" placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendTeacherMsg()"/>
+                <button class="btn btn-yellow" onclick="sendTeacherMsg()">Send ➤</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADMIN PORTAL -->
+  <div id="portalAdmin" style="display:none">
+    <div class="portal-layout">
+      <div class="sidebar">
+        <h3>🏫 ADMIN</h3>
+        <button class="sidebar-btn active" onclick="adminTab('aLeaves',this)">📋 Leave Approvals</button>
+        <button class="sidebar-btn" onclick="adminTab('aPlans',this)">📁 Lesson Plans</button>
+        <button class="sidebar-btn" onclick="adminTab('aDTR',this)">🕐 DTR Records</button>
+        <button class="sidebar-btn" onclick="adminTab('aIPCRF',this)">📊 IPCRF Records</button>
+        <button class="sidebar-btn" onclick="adminTab('aBullying',this)">🚨 Bully Reports</button>
+        <button class="sidebar-btn" onclick="adminTab('aEditContent',this)">✏️ Edit Content</button>
+        <button class="sidebar-btn" onclick="adminTab('aTeachers',this)">👥 Manage Teachers</button>
+        <button class="sidebar-btn" onclick="adminTab('aChat',this)">💬 Messages <span id="adminUnreadBadge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:0 5px;font-size:.62rem;margin-left:.25rem">!</span></button>
+        <button class="sidebar-btn" style="margin-top:1.5rem;color:#fca5a5" onclick="doLogout()">🚪 Logout</button>
+      </div>
+      <div class="portal-content">
+        <!-- LEAVES -->
+        <div id="aLeaves" class="admin-section">
+          <div class="portal-card">
+            <h3>📋 Leave Requests</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>Teacher</th><th>Type</th><th>Category</th><th>From</th><th>To</th><th>Reason</th><th>Doc</th><th>Status</th><th>Action</th></tr></thead><tbody id="adminLeavesBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- LESSON PLANS -->
+        <div id="aPlans" class="admin-section" style="display:none">
+          <div class="portal-card">
+            <h3>📁 Submitted Lesson Plans</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>Teacher</th><th>Subject</th><th>Grade</th><th>Section</th><th>Quarter</th><th>Week</th><th>Topic</th><th>Date</th><th>File</th></tr></thead><tbody id="adminPlansBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- DTR ADMIN -->
+        <div id="aDTR" class="admin-section" style="display:none">
+          <div class="portal-card">
+            <h3>🕐 Teacher DTR Records</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>Teacher</th><th>Month</th><th>Year</th><th>Remarks</th><th>File</th><th>Submitted</th><th>Status</th><th>Action</th></tr></thead><tbody id="adminDTRBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- IPCRF ADMIN -->
+        <div id="aIPCRF" class="admin-section" style="display:none">
+          <div class="portal-card">
+            <h3>📊 Teacher IPCRF Records</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>Teacher</th><th>School Year</th><th>Period</th><th>Position</th><th>File</th><th>Submitted</th><th>Status</th><th>Action</th></tr></thead><tbody id="adminIPCRFBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- BULLY -->
+        <div id="aBullying" class="admin-section" style="display:none">
+          <div class="portal-card">
+            <h3>🚨 Bullying Reports</h3>
+            <div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Date</th><th>Type</th><th>Location</th><th>Reporter</th><th>Description</th><th>Status</th><th>Action</th></tr></thead><tbody id="adminBullyBody"></tbody></table></div>
+          </div>
+        </div>
+        <!-- EDIT CONTENT -->
+        <div id="aEditContent" class="admin-section" style="display:none">
+          <div class="edit-section">
+            <h3>🖼️ Hero Banner — Wallpaper / Video</h3>
+            <p style="font-size:.78rem;color:#555;margin-bottom:.75rem">Upload a background image or video for the home page hero banner.</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem">
+              <div class="form-row"><label>Upload Image (JPG/PNG)</label><input type="file" id="bannerImgUpload" accept=".jpg,.jpeg,.png,.webp" onchange="updateBannerImage(this)"/></div>
+              <div class="form-row"><label>Upload Video (MP4/WebM)</label><input type="file" id="bannerVideoUpload" accept=".mp4,.webm" onchange="updateBannerVideo(this)"/></div>
+            </div>
+            <button class="btn btn-gray btn-sm" onclick="clearBanner()">🗑 Remove Banner Media</button>
+          </div>
+          <div class="edit-section">
+            <h3>🏠 Home Page — Stats</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem">
+              <div class="form-row"><label>Hero Subtitle</label><input type="text" id="editSubtitle"/></div>
+              <div class="form-row"><label>Students</label><input type="text" id="editStudents"/></div>
+              <div class="form-row"><label>Faculty</label><input type="text" id="editFaculty"/></div>
+              <div class="form-row"><label>Classrooms</label><input type="text" id="editRooms"/></div>
+              <div class="form-row"><label>Awards</label><input type="text" id="editAwards"/></div>
+            </div>
+            <button class="btn btn-yellow btn-sm" onclick="saveStats()">💾 Save Stats</button>
+          </div>
+          <div class="edit-section">
+            <h3>🖼️ School Logo</h3>
+            <div class="form-row"><input type="file" id="logoUpload" accept=".png,.jpg,.jpeg,.svg" onchange="updateLogo(this)"/></div>
+          </div>
+          <div class="edit-section">
+            <h3>🏛️ About Page</h3>
+            <div class="form-row"><label>Mission</label><textarea id="editMission" rows="3"></textarea></div>
+            <div class="form-row"><label>Vision</label><textarea id="editVision" rows="3"></textarea></div>
+            <div class="form-row"><label>History</label><textarea id="editHistory" rows="3"></textarea></div>
+            <div class="form-row"><label>Contact Info</label><textarea id="editContact" rows="3"></textarea></div>
+            <div class="form-row"><label>Office Hours</label><textarea id="editHours" rows="3"></textarea></div>
+            <button class="btn btn-yellow btn-sm" onclick="saveAbout()">💾 Save</button>
+          </div>
+          <div class="edit-section">
+            <h3>📰 News & Announcements</h3>
+            <div id="newsAdminList"></div>
+            <button class="btn btn-blue btn-sm" onclick="openAddNewsModal()">➕ Add News</button>
+          </div>
+        </div>
+        <!-- MANAGE TEACHERS -->
+        <div id="aTeachers" class="admin-section" style="display:none">
+          <div class="edit-section">
+            <h3>➕ Add Teacher Account</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem">
+              <div class="form-row"><label>Full Name</label><input type="text" id="newTName" placeholder="e.g. Ms. Maria Santos"/></div>
+              <div class="form-row"><label>Department</label><input type="text" id="newTDept" placeholder="e.g. Math Dept."/></div>
+              <div class="form-row"><label>Username</label><input type="text" id="newTUser" placeholder="e.g. msantos"/></div>
+              <div class="form-row"><label>Password</label><input type="password" id="newTPass" placeholder="Password"/></div>
+            </div>
+            <button class="btn btn-yellow btn-sm" onclick="addTeacher()">➕ Create Account</button>
+          </div>
+          <div class="edit-section">
+            <h3>👥 Teacher Accounts</h3>
+            <div id="teacherAccountsList"></div>
+          </div>
+          <div class="edit-section">
+            <h3>🔑 Admin Credentials</h3>
+            <div class="form-row"><label>New Username</label><input type="text" id="newAdminUser"/></div>
+            <div class="form-row"><label>New Password</label><input type="password" id="newAdminPass"/></div>
+            <div class="form-row"><label>Confirm Password</label><input type="password" id="newAdminPassConfirm"/></div>
+            <button class="btn btn-yellow btn-sm" onclick="saveAdminCreds()">💾 Update</button>
+          </div>
+        </div>
+        <!-- CHAT -->
+        <div id="aChat" class="admin-section" style="display:none">
+          <div style="display:grid;grid-template-columns:250px 1fr;gap:.9rem;height:500px">
+            <div>
+              <div style="font-size:.8rem;font-weight:700;color:var(--blue);margin-bottom:.45rem">💬 Conversations</div>
+              <div class="chat-threads" id="adminChatThreads"></div>
+            </div>
+            <div id="adminChatPanel" style="display:flex;flex-direction:column">
+              <div style="display:flex;align-items:center;justify-content:center;height:100%;color:#bbb;font-size:.88rem" id="noChatSelected">👈 Select a conversation</div>
+              <div class="chat-wrap" id="adminChatWrap" style="display:none">
+                <div class="chat-header"><div class="online-dot"></div><span id="adminChatTeacherName"></span></div>
+                <div class="chat-messages" id="adminChatMessages"></div>
+                <div class="chat-input-row">
+                  <input type="text" id="adminChatInput" placeholder="Reply..." onkeydown="if(event.key==='Enter')sendAdminMsg()"/>
+                  <button class="btn btn-yellow" onclick="sendAdminMsg()">Send ➤</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODALS -->
+<div class="modal-bg" id="bullyModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeBullyModal()">✕</button>
+    <div style="font-size:1.7rem;margin-bottom:.35rem">🚨</div>
+    <h2 style="color:var(--red)">Report Bullying</h2>
+    <p style="font-size:.78rem;color:#555;margin-bottom:.85rem">Confidential. Reviewed by the Child Protection Officer.</p>
+    <div class="form-row"><label>Type of Bullying</label><select id="bullyType"><option>Physical Bullying</option><option>Verbal Bullying</option><option>Cyberbullying</option><option>Social/Relational Bullying</option><option>Other</option></select></div>
+    <div class="form-row"><label>Where did it happen?</label><select id="bullyLocation"><option>Classroom</option><option>Hallway/Corridor</option><option>Canteen</option><option>Comfort Room</option><option>Online/Social Media</option><option>Outside School</option><option>Other</option></select></div>
+    <div class="form-row"><label>Describe what happened</label><textarea id="bullyDesc" placeholder="Please describe the incident..."></textarea></div>
+    <div class="form-row"><label>Your Name (Optional)</label><input type="text" id="bullyName" placeholder="Anonymous"/></div>
+    <div class="form-row"><label>Date of Incident</label><input type="date" id="bullyDate"/></div>
+    <button class="btn btn-red" style="width:100%" onclick="submitBullyReport()">📤 Submit Report</button>
+  </div>
+</div>
+<div class="modal-bg" id="addNewsModal">
+  <div class="modal">
+    <button class="modal-close" onclick="document.getElementById('addNewsModal').classList.remove('open')">✕</button>
+    <h2>➕ Add News / Announcement</h2>
+    <div class="form-row"><label>Type</label><select id="newNewsType"><option>News</option><option>Event</option><option>Announcement</option></select></div>
+    <div class="form-row"><label>Icon (emoji)</label><input type="text" id="newNewsIcon" value="📣" maxlength="4"/></div>
+    <div class="form-row"><label>Title</label><input type="text" id="newNewsTitle" placeholder="News title..."/></div>
+    <div class="form-row"><label>Description</label><textarea id="newNewsDesc" placeholder="Brief description..."></textarea></div>
+    <div class="form-row"><label>Date</label><input type="date" id="newNewsDate"/></div>
+    <button class="btn btn-yellow" style="width:100%" onclick="addNewsItem()">✅ Add Post</button>
+  </div>
+</div>
+<div class="modal-bg" id="viewModal">
+  <div class="modal" style="max-width:560px">
+    <button class="modal-close" onclick="document.getElementById('viewModal').classList.remove('open')">✕</button>
+    <h2 id="viewModalTitle"></h2>
+    <div id="viewModalBody"></div>
+    <div style="margin-top:1rem;display:flex;gap:.65rem;flex-wrap:wrap" id="viewModalActions"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ═══════════ STATE ═══════════
+var S = {
+  loginMode: 'teacher',           // ← single source of truth, no re-declaration
+  adminCreds: {user:'admin', pass:'admin123'},
+  teacherAccounts: [{name:'Teacher (Default)', dept:'General', user:'teacher', pass:'1234'}],
+  currentTeacher: '',
+  currentTeacherUser: '',
+  leaveRequests: [],
+  lessonPlans: [],
+  dtrRecords: [],
+  ipcrfRecords: [],
+  bullyReports: [],
+  chatMessages: {},
+  adminSelectedThread: null,
+  adminUnread: {}
+};
+
+var newsData = [
+  {type:'News',icon:'📣',title:'Enrollment for SY 2026-2027 Now Open',desc:'Enrollment for the upcoming school year is now open.',date:'June 20, 2026'},
+  {type:'Event',icon:'🔬',title:'Science Fair 2026',desc:'Join our annual Science Fair on June 25!',date:'June 18, 2026'},
+  {type:'Announcement',icon:'📋',title:'Quarterly Exam Schedule Released',desc:'The Q1 exam schedule has been posted.',date:'June 15, 2026'},
+  {type:'News',icon:'🏆',title:'EMMNS Wins Regional Quiz Bee',desc:'Our students brought home gold!',date:'June 12, 2026'},
+  {type:'Event',icon:'🎭',title:'Cultural Night — Save the Date!',desc:'Annual Cultural Night set for July 15.',date:'June 10, 2026'},
+  {type:'Announcement',icon:'🚌',title:'School Bus Schedule Update',desc:'Updated bus routes available at the main office.',date:'June 8, 2026'},
+];
+
+var facultyData = [
+  {name:'Mrs. Ana Santos',role:'Principal',init:'AS'},{name:'Mr. Jose Cruz',role:'Math',init:'JC'},
+  {name:'Ms. Maria Reyes',role:'English',init:'MR'},{name:'Mr. Pedro Bautista',role:'Science',init:'PB'},
+  {name:'Ms. Luisa Flores',role:'Filipino',init:'LF'},{name:'Mr. Ramon dela Cruz',role:'MAPEH',init:'RC'},
+  {name:'Ms. Celia Torres',role:'TLE',init:'CT'},{name:'Mr. Allan Morales',role:'AP/Values',init:'AM'},
+];
+
+var depedForms = [
+  {icon:'📄',title:'Service Record',desc:'Official service record for DepEd employees.',category:'Personnel',color:'#1a4fa0'},
+  {icon:'📝',title:'Leave Application (CS Form 6)',desc:'Application for Leave of Absence.',category:'Leave',color:'#059669'},
+  {icon:'📊',title:'IPCRF Form',desc:'Individual Performance Commitment and Review Form.',category:'Performance',color:'#7c3aed'},
+  {icon:'📋',title:'Daily Time Record (CS Form 48)',desc:'Official daily time record form.',category:'Attendance',color:'#b45309'},
+  {icon:'🧾',title:'Disbursement Voucher',desc:'Official payment request form.',category:'Finance',color:'#d32f2f'},
+  {icon:'📚',title:'Learner Information Sheet',desc:'Official learner enrollment form.',category:'Student',color:'#0284c7'},
+  {icon:'🏥',title:'Medical Certificate',desc:'Official medical certificate for sick leave.',category:'Health',color:'#059669'},
+  {icon:'✅',title:'Certificate of Appearance',desc:'For official travel and off-campus activities.',category:'Travel',color:'#1a4fa0'},
+  {icon:'🗂️',title:'Oath of Office',desc:'For newly hired personnel.',category:'Personnel',color:'#7c3aed'},
+  {icon:'📃',title:'Position Description Form',desc:'Detailed duties and responsibilities.',category:'Personnel',color:'#b45309'},
+  {icon:'📑',title:'School Report Card (SRC)',desc:'Student academic report card template.',category:'Student',color:'#0284c7'},
+  {icon:'🔏',title:'Authority to Travel',desc:'Permission for official travel.',category:'Travel',color:'#d32f2f'},
+];
+
+// ═══════════ INIT ═══════════
+(function(){
+  var ws = document.getElementById('lpWeek');
+  for(var i=1;i<=10;i++) ws.innerHTML += '<option>Week '+i+'</option>';
+  document.getElementById('bullyDate').valueAsDate = new Date();
+  document.getElementById('newNewsDate').valueAsDate = new Date();
+  renderNewsCards(newsData.slice(0,3), document.getElementById('homeNewsCards'));
+  renderNewsCards(newsData, document.getElementById('allNewsCards'));
+  document.getElementById('facultyGrid').innerHTML = facultyData.map(function(f){
+    return '<div class="faculty-card"><div class="faculty-avatar">'+f.init+'</div><h4>'+f.name+'</h4><p>'+f.role+'</p></div>';
+  }).join('');
+  renderForms();
+})();
+
+// ═══════════ HELPERS ═══════════
+function esc(t){ return String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function now(){ return new Date().toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'}); }
+function todayStr(){ return new Date().toLocaleDateString('en-PH'); }
+function showToast(msg){ var t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(function(){t.classList.remove('show');},3000); }
+function renderTag(t){ var m={News:'tag-news',Event:'tag-event',Announcement:'tag-announce'}; return '<span class="tag '+(m[t]||'tag-news')+'">'+t+'</span>'; }
+function renderStatusBadge(s){ return '<span class="status-badge status-'+s+'">'+s.charAt(0).toUpperCase()+s.slice(1)+'</span>'; }
+function fileIconBtn(label,icon,onclick){ return '<button class="btn btn-'+(icon==='👁'?'blue':'green')+' btn-sm" onclick="'+onclick+'">'+icon+' '+label+'</button>'; }
+
+function readFile(input, cb){
+  if(input.files && input.files[0]){
+    var r = new FileReader();
+    r.onload = function(e){ cb(e.target.result, input.files[0].name); };
+    r.readAsDataURL(input.files[0]);
+  } else { cb(null, null); }
+}
+
+function openFile(fileData, fileName){
+  if(!fileData){ showToast('No file attached.'); return; }
+  var w = window.open('','_blank');
+  if(fileData.indexOf('data:image') === 0){
+    w.document.write('<img src="'+fileData+'" style="max-width:100%"/>');
+  } else {
+    w.document.write('<iframe src="'+fileData+'" style="width:100%;height:100vh;border:none"></iframe>');
+  }
+}
+function dlFile(fileData, fileName){
+  if(!fileData){ showToast('No file attached.'); return; }
+  var a = document.createElement('a'); a.href=fileData; a.download=fileName||'file'; a.click();
+}
+
+// ═══════════ FORMS ═══════════
+function renderForms(){
+  document.getElementById('formsGrid').innerHTML = depedForms.map(function(f){
+    return '<div class="form-card" style="border-top-color:'+f.color+'"><div class="fc-icon">'+f.icon+'</div><h4>'+f.title+'</h4><p>'+f.desc+'</p><div class="fc-meta">📁 '+f.category+'</div><button class="btn btn-blue btn-sm" style="width:100%" onclick="showToast(\'Downloading '+f.title+'...\')">⬇ Download Form</button></div>';
+  }).join('');
+}
+
+// ═══════════ NAV ═══════════
+function goPage(id, btn){
+  document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active');});
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.nav-links button').forEach(function(b){b.classList.remove('active');});
+  if(btn) btn.classList.add('active');
+  document.getElementById('navLinks').classList.remove('open');
+}
+function toggleNav(){ document.getElementById('navLinks').classList.toggle('open'); }
+function filterNews(t){ renderNewsCards(t==='all'?newsData:newsData.filter(function(n){return n.type===t;}), document.getElementById('allNewsCards')); }
+function renderNewsCards(data, el){
+  el.innerHTML = data.map(function(n){
+    return '<div class="news-card"><div class="card-img">'+n.icon+'</div><div class="card-body">'+renderTag(n.type)+'<h3>'+esc(n.title)+'</h3><p>'+esc(n.desc)+'</p><div class="card-date">🗓 '+n.date+'</div></div></div>';
+  }).join('');
+}
+function refreshNews(){
+  renderNewsCards(newsData.slice(0,3), document.getElementById('homeNewsCards'));
+  renderNewsCards(newsData, document.getElementById('allNewsCards'));
+}
+
+// ═══════════ LOGIN — loginMode lives in S, never re-declared ═══════════
+function switchLoginTab(t){
+  S.loginMode = t;
+  document.getElementById('tabTeacher').classList.toggle('active', t==='teacher');
+  document.getElementById('tabAdmin').classList.toggle('active', t==='admin');
+}
+
+function doLogin(){
+  var u = document.getElementById('loginUser').value.trim();
+  var p = document.getElementById('loginPass').value;
+  var err = document.getElementById('loginError');
+
+  if(S.loginMode === 'teacher'){
+    var acc = S.teacherAccounts.find(function(a){ return a.user===u && a.pass===p; });
+    if(acc){
+      err.style.display = 'none';
+      S.currentTeacher = acc.name;
+      S.currentTeacherUser = acc.user;
+      if(!S.chatMessages[u]) S.chatMessages[u] = [];
+      document.getElementById('portalLogin').style.display = 'none';
+      document.getElementById('portalTeacher').style.display = 'block';
+      renderMyPlans(); renderMyLeaves(); renderMyDTR(); renderMyIPCRF(); renderTeacherChat();
+      return;
+    }
+  }
+
+  if(S.loginMode === 'admin'){
+    if(u === S.adminCreds.user && p === S.adminCreds.pass){
+      err.style.display = 'none';
+      document.getElementById('portalLogin').style.display = 'none';
+      document.getElementById('portalAdmin').style.display = 'block';
+      renderAdminLeaves(); renderAdminPlans(); renderAdminDTR(); renderAdminIPCRF();
+      renderAdminBully(); loadEditFields(); renderTeacherAccountsList(); renderAdminChatThreads();
+      document.getElementById('newAdminUser').value = S.adminCreds.user;
+      return;
+    }
+  }
+
+  err.style.display = 'block';
+}
+
+function doLogout(){
+  ['portalTeacher','portalAdmin'].forEach(function(id){ document.getElementById(id).style.display='none'; });
+  document.getElementById('portalLogin').style.display = 'flex';
+  document.getElementById('loginUser').value = '';
+  document.getElementById('loginPass').value = '';
+  document.getElementById('loginError').style.display = 'none';
+  S.currentTeacher = '';
+  S.currentTeacherUser = '';
+  S.adminSelectedThread = null;
+}
+
+// ═══════════ TABS ═══════════
+function portalTab(id, btn){
+  document.querySelectorAll('.portal-section').forEach(function(s){s.style.display='none';});
+  document.getElementById(id).style.display = 'block';
+  document.querySelectorAll('#portalTeacher .sidebar-btn').forEach(function(b){b.classList.remove('active');});
+  btn.classList.add('active');
+  if(id==='pMyLeaves') renderMyLeaves();
+  if(id==='pUpload')   renderMyPlans();
+  if(id==='pDTR')      renderMyDTR();
+  if(id==='pIPCRF')    renderMyIPCRF();
+  if(id==='pChat')     renderTeacherChat();
+}
+function adminTab(id, btn){
+  document.querySelectorAll('.admin-section').forEach(function(s){s.style.display='none';});
+  document.getElementById(id).style.display = 'block';
+  document.querySelectorAll('#portalAdmin .sidebar-btn').forEach(function(b){b.classList.remove('active');});
+  btn.classList.add('active');
+  if(id==='aLeaves')      renderAdminLeaves();
+  if(id==='aPlans')       renderAdminPlans();
+  if(id==='aDTR')         renderAdminDTR();
+  if(id==='aIPCRF')       renderAdminIPCRF();
+  if(id==='aBullying')    renderAdminBully();
+  if(id==='aEditContent') loadEditFields();
+  if(id==='aTeachers')    renderTeacherAccountsList();
+  if(id==='aChat')        { renderAdminChatThreads(); S.adminUnread={}; updateAdminUnreadBadge(); }
+}
+
+// ═══════════ LESSON PLANS ═══════════
+function submitLessonPlan(){
+  var s=document.getElementById('lpSubject').value.trim(), t=document.getElementById('lpTopic').value.trim();
+  if(!s||!t){showToast('⚠️ Fill Subject and Topic.'); return;}
+  readFile(document.getElementById('lpFile'), function(fd, fn){
+    var record = {
+      teacher:S.currentTeacher, teacherUser:S.currentTeacherUser,
+      subject:s, grade:document.getElementById('lpGrade').value,
+      section:document.getElementById('lpSection').value,
+      quarter:document.getElementById('lpQuarter').value,
+      week:document.getElementById('lpWeek').value, topic:t,
+      date:todayStr(), fileName:fn, fileData:fd
+    };
+    S.lessonPlans.push(record);
+    if(window.fbAddRecord) fbAddRecord('lessonPlans', record);
+    renderMyPlans(); renderAdminPlans();
+    showToast('✅ Lesson plan submitted!');
+    document.getElementById('lpSubject').value=''; document.getElementById('lpTopic').value='';
+    document.getElementById('lpSection').value=''; document.getElementById('lpFile').value='';
+  });
+}
+function renderMyPlans(){
+  var mine = S.lessonPlans.filter(function(p){return p.teacherUser===S.currentTeacherUser;});
+  document.getElementById('myPlansBody').innerHTML = mine.length===0
+    ? '<tr><td colspan="7" style="text-align:center;color:#aaa">No lesson plans yet.</td></tr>'
+    : mine.map(function(p){
+        return '<tr><td>'+esc(p.subject)+'</td><td>'+p.grade+'</td><td>'+(p.section||'—')+'</td><td>'+p.quarter+'</td><td>'+p.week+'</td><td>'+esc(p.topic)+'</td><td>'+p.date+'</td></tr>';
+      }).join('');
+}
+function renderAdminPlans(){
+  document.getElementById('adminPlansBody').innerHTML = S.lessonPlans.length===0
+    ? '<tr><td colspan="9" style="text-align:center;color:#aaa">No plans.</td></tr>'
+    : S.lessonPlans.map(function(p,i){
+        var btns = p.fileData
+          ? fileIconBtn('View','👁','viewRecord('+i+',\'plan\')')+' '+fileIconBtn('DL','⬇','dlRecord('+i+',\'plan\')')
+          : '<span style="color:#aaa">No file</span>';
+        return '<tr><td>'+esc(p.teacher)+'</td><td>'+esc(p.subject)+'</td><td>'+p.grade+'</td><td>'+(p.section||'—')+'</td><td>'+p.quarter+'</td><td>'+p.week+'</td><td>'+esc(p.topic)+'</td><td>'+p.date+'</td><td style="white-space:nowrap">'+btns+'</td></tr>';
+      }).join('');
+}
+
+// ═══════════ LEAVE ═══════════
+function submitLeave(){
+  var reason=document.getElementById('leaveReason').value.trim();
+  var from=document.getElementById('leaveFrom').value, to=document.getElementById('leaveTo').value;
+  if(!reason||!from||!to){showToast('⚠️ Fill all required fields.'); return;}
+  readFile(document.getElementById('leaveFile'), function(fd, fn){
+    var record = {
+      teacher:S.currentTeacher, teacherUser:S.currentTeacherUser,
+      type:document.getElementById('leaveType').value,
+      category:document.getElementById('leaveCategory').value,
+      from:from, to:to, reason:reason, fileName:fn, fileData:fd,
+      status:'pending', submittedAt:todayStr()
+    };
+    S.leaveRequests.push(record);
+    if(window.fbAddRecord) fbAddRecord('leaveRequests', record);
+    renderMyLeaves(); renderAdminLeaves(); showToast('✅ Leave submitted!');
+    document.getElementById('leaveReason').value=''; document.getElementById('leaveFrom').value='';
+    document.getElementById('leaveTo').value=''; document.getElementById('leaveFile').value='';
+  });
+}
+function renderMyLeaves(){
+  var mine = S.leaveRequests.filter(function(l){return l.teacherUser===S.currentTeacherUser;});
+  document.getElementById('myLeavesBody').innerHTML = mine.length===0
+    ? '<tr><td colspan="7" style="text-align:center;color:#aaa">No leave requests yet.</td></tr>'
+    : mine.map(function(l){
+        return '<tr><td>'+esc(l.type)+'</td><td>'+l.category+'</td><td>'+l.from+'</td><td>'+l.to+'</td><td>'+esc(l.reason)+'</td><td>'+(l.fileData?'📎':'—')+'</td><td>'+renderStatusBadge(l.status)+'</td></tr>';
+      }).join('');
+}
+function renderAdminLeaves(){
+  document.getElementById('adminLeavesBody').innerHTML = S.leaveRequests.length===0
+    ? '<tr><td colspan="9" style="text-align:center;color:#aaa">No requests.</td></tr>'
+    : S.leaveRequests.map(function(l,i){
+        var btns = l.fileData ? fileIconBtn('View','👁','viewRecord('+i+',\'leave\')')+' '+fileIconBtn('DL','⬇','dlRecord('+i+',\'leave\')') : '—';
+        var action = l.status==='pending'
+          ? '<button class="btn btn-green btn-sm" onclick="updateLeave('+i+',\'approved\')">✅</button> <button class="btn btn-sm" style="background:#fee2e2;color:#991b1b" onclick="updateLeave('+i+',\'rejected\')">❌</button>' : '';
+        return '<tr><td>'+esc(l.teacher)+'</td><td>'+esc(l.type)+'</td><td>'+l.category+'</td><td>'+l.from+'</td><td>'+l.to+'</td><td>'+esc(l.reason)+'</td><td style="white-space:nowrap">'+btns+'</td><td>'+renderStatusBadge(l.status)+'</td><td style="white-space:nowrap">'+action+'</td></tr>';
+      }).join('');
+}
+function updateLeave(i,s){
+  S.leaveRequests[i].status=s;
+  if(window.fbUpdateRecord && S.leaveRequests[i]._id) fbUpdateRecord('leaveRequests', S.leaveRequests[i]._id, {status:s});
+  renderAdminLeaves(); showToast('Leave '+s+'!');
+}
+
+// ═══════════ DTR ═══════════
+function submitDTR(){
+  var mo=document.getElementById('dtrMonth').value, yr=document.getElementById('dtrYear').value;
+  var remarks=document.getElementById('dtrRemarks').value.trim();
+  var fInput=document.getElementById('dtrFile');
+  if(!fInput.files||!fInput.files[0]){showToast('⚠️ Please upload your DTR file (PDF or Excel).'); return;}
+  var ext=fInput.files[0].name.split('.').pop().toLowerCase();
+  if(!['pdf','xls','xlsx'].includes(ext)){showToast('⚠️ Only PDF, XLS, or XLSX files are accepted.'); return;}
+  readFile(fInput, function(fd,fn){
+    var record = {
+      teacher:S.currentTeacher, teacherUser:S.currentTeacherUser,
+      month:mo, year:yr, remarks:remarks, fileName:fn, fileData:fd,
+      status:'pending', submittedAt:todayStr()
+    };
+    S.dtrRecords.push(record);
+    if(window.fbAddRecord) fbAddRecord('dtrRecords', record);
+    renderMyDTR(); renderAdminDTR();
+    showToast('✅ DTR for '+mo+' '+yr+' submitted!');
+    document.getElementById('dtrFile').value=''; document.getElementById('dtrRemarks').value='';
+  });
+}
+function renderMyDTR(){
+  document.getElementById('myDTRBody').innerHTML = S.dtrRecords.filter(function(d){return d.teacherUser===S.currentTeacherUser;}).length===0
+    ? '<tr><td colspan="6" style="text-align:center;color:#aaa">No DTRs submitted yet.</td></tr>'
+    : S.dtrRecords.filter(function(d){return d.teacherUser===S.currentTeacherUser;}).map(function(d,_,arr){
+        var i=S.dtrRecords.indexOf(d);
+        return '<tr><td>'+d.month+'</td><td>'+d.year+'</td><td>'+(d.remarks||'—')+'</td><td style="white-space:nowrap">'+fileIconBtn('View','👁','viewRecord('+i+',\'dtr\')')+' '+fileIconBtn('DL','⬇','dlRecord('+i+',\'dtr\')')+'</td><td>'+d.submittedAt+'</td><td>'+renderStatusBadge(d.status)+'</td></tr>';
+      }).join('');
+}
+function renderAdminDTR(){
+  document.getElementById('adminDTRBody').innerHTML = S.dtrRecords.length===0
+    ? '<tr><td colspan="8" style="text-align:center;color:#aaa">No DTR records.</td></tr>'
+    : S.dtrRecords.map(function(d,i){
+        var action = d.status==='pending'
+          ? '<button class="btn btn-green btn-sm" onclick="updateDTR('+i+',\'approved\')">✅</button> <button class="btn btn-sm" style="background:#fee2e2;color:#991b1b" onclick="updateDTR('+i+',\'rejected\')">❌</button>'
+          : '';
+        return '<tr><td>'+esc(d.teacher)+'</td><td>'+d.month+'</td><td>'+d.year+'</td><td>'+(d.remarks||'—')+'</td><td style="white-space:nowrap">'+fileIconBtn('View','👁','viewRecord('+i+',\'dtr\')')+' '+fileIconBtn('DL','⬇','dlRecord('+i+',\'dtr\')')+'</td><td>'+d.submittedAt+'</td><td>'+renderStatusBadge(d.status)+'</td><td style="white-space:nowrap">'+action+'</td></tr>';
+      }).join('');
+}
+function updateDTR(i,s){
+  S.dtrRecords[i].status=s;
+  if(window.fbUpdateRecord && S.dtrRecords[i]._id) fbUpdateRecord('dtrRecords', S.dtrRecords[i]._id, {status:s});
+  renderAdminDTR(); showToast('DTR '+s+'!');
+}
+
+// ═══════════ IPCRF ═══════════
+function submitIPCRF(){
+  var sy=document.getElementById('iSY').value.trim(), period=document.getElementById('iRating').value;
+  var pos=document.getElementById('iPosition').value.trim();
+  var fInput=document.getElementById('iFile');
+  if(!fInput.files||!fInput.files[0]){showToast('⚠️ Please upload your IPCRF file (PDF or Excel).'); return;}
+  var ext=fInput.files[0].name.split('.').pop().toLowerCase();
+  if(!['pdf','xls','xlsx'].includes(ext)){showToast('⚠️ Only PDF, XLS, or XLSX files are accepted.'); return;}
+  if(!sy){showToast('⚠️ Please enter the School Year.'); return;}
+  readFile(fInput, function(fd,fn){
+    var record = {
+      teacher:S.currentTeacher, teacherUser:S.currentTeacherUser,
+      sy:sy, period:period, position:pos||'—',
+      station:document.getElementById('iStation').value,
+      remarks:document.getElementById('iRemarks').value,
+      fileName:fn, fileData:fd,
+      status:'pending', submittedAt:todayStr()
+    };
+    S.ipcrfRecords.push(record);
+    if(window.fbAddRecord) fbAddRecord('ipcrfRecords', record);
+    renderMyIPCRF(); renderAdminIPCRF();
+    showToast('✅ IPCRF for SY '+sy+' submitted!');
+    document.getElementById('iFile').value=''; document.getElementById('iRemarks').value='';
+  });
+}
+function renderMyIPCRF(){
+  document.getElementById('myIPCRFBody').innerHTML = S.ipcrfRecords.filter(function(r){return r.teacherUser===S.currentTeacherUser;}).length===0
+    ? '<tr><td colspan="6" style="text-align:center;color:#aaa">No IPCRF submitted yet.</td></tr>'
+    : S.ipcrfRecords.filter(function(r){return r.teacherUser===S.currentTeacherUser;}).map(function(r,_,arr){
+        var i=S.ipcrfRecords.indexOf(r);
+        return '<tr><td>'+esc(r.sy)+'</td><td>'+esc(r.period)+'</td><td>'+esc(r.position)+'</td><td style="white-space:nowrap">'+fileIconBtn('View','👁','viewRecord('+i+',\'ipcrf\')')+' '+fileIconBtn('DL','⬇','dlRecord('+i+',\'ipcrf\')')+'</td><td>'+r.submittedAt+'</td><td>'+renderStatusBadge(r.status)+'</td></tr>';
+      }).join('');
+}
+function renderAdminIPCRF(){
+  document.getElementById('adminIPCRFBody').innerHTML = S.ipcrfRecords.length===0
+    ? '<tr><td colspan="8" style="text-align:center;color:#aaa">No IPCRF records.</td></tr>'
+    : S.ipcrfRecords.map(function(r,i){
+        var action = r.status==='pending'
+          ? '<button class="btn btn-green btn-sm" onclick="updateIPCRF('+i+',\'approved\')">✅</button> <button class="btn btn-sm" style="background:#fee2e2;color:#991b1b" onclick="updateIPCRF('+i+',\'rejected\')">❌</button> <button class="btn btn-blue btn-sm" onclick="viewIPCRFDetails('+i+')">📄</button>'
+          : '';
+        return '<tr><td>'+esc(r.teacher)+'</td><td>'+esc(r.sy)+'</td><td>'+esc(r.period)+'</td><td>'+esc(r.position)+'</td><td style="white-space:nowrap">'+fileIconBtn('View','👁','viewRecord('+i+',\'ipcrf\')')+' '+fileIconBtn('DL','⬇','dlRecord('+i+',\'ipcrf\')')+'</td><td>'+r.submittedAt+'</td><td>'+renderStatusBadge(r.status)+'</td><td style="white-space:nowrap">'+action+'</td></tr>';
+      }).join('');
+}
+function updateIPCRF(i,s){
+  S.ipcrfRecords[i].status=s;
+  if(window.fbUpdateRecord && S.ipcrfRecords[i]._id) fbUpdateRecord('ipcrfRecords', S.ipcrfRecords[i]._id, {status:s});
+  renderAdminIPCRF(); showToast('IPCRF '+s+'!');
+}
+function viewIPCRFDetails(i){
+  var r=S.ipcrfRecords[i];
+  document.getElementById('viewModalTitle').textContent='📊 IPCRF — '+r.teacher;
+  document.getElementById('viewModalBody').innerHTML =
+    '<div class="view-field"><span class="vf-label">Teacher:</span><span>'+esc(r.teacher)+'</span></div>'+
+    '<div class="view-field"><span class="vf-label">School Year:</span><span>'+esc(r.sy)+'</span></div>'+
+    '<div class="view-field"><span class="vf-label">Period:</span><span>'+esc(r.period)+'</span></div>'+
+    '<div class="view-field"><span class="vf-label">Position:</span><span>'+esc(r.position)+'</span></div>'+
+    '<div class="view-field"><span class="vf-label">Station:</span><span>'+esc(r.station)+'</span></div>'+
+    '<div class="view-field"><span class="vf-label">Submitted:</span><span>'+r.submittedAt+'</span></div>'+
+    '<div class="view-field"><span class="vf-label">File:</span><span>'+esc(r.fileName||'None')+'</span></div>'+
+    (r.remarks?'<div class="view-field"><span class="vf-label">Remarks:</span><span>'+esc(r.remarks)+'</span></div>':'');
+  document.getElementById('viewModalActions').innerHTML = r.fileData
+    ? fileIconBtn('View File','👁','viewRecord('+i+",\\'ipcrf\\')")+' '+fileIconBtn('Download','⬇','dlRecord('+i+",\\'ipcrf\\')")
+    : '';
+  document.getElementById('viewModal').classList.add('open');
+}
+
+// ═══════════ FILE ACTIONS ═══════════
+function viewRecord(i, type){
+  var r = type==='dtr'?S.dtrRecords[i]:type==='ipcrf'?S.ipcrfRecords[i]:type==='leave'?S.leaveRequests[i]:S.lessonPlans[i];
+  openFile(r.fileData, r.fileName);
+}
+function dlRecord(i, type){
+  var r = type==='dtr'?S.dtrRecords[i]:type==='ipcrf'?S.ipcrfRecords[i]:type==='leave'?S.leaveRequests[i]:S.lessonPlans[i];
+  dlFile(r.fileData, r.fileName);
+}
+
+// ═══════════ BANNER ═══════════
+function updateBannerImage(inp){
+  readFile(inp, function(fd){
+    clearBannerMedia();
+    var img=document.createElement('img'); img.className='hero-bg'; img.src=fd;
+    document.getElementById('heroBanner').insertBefore(img, document.getElementById('heroOverlay'));
+    showToast('✅ Banner image updated!');
+  });
+}
+function updateBannerVideo(inp){
+  readFile(inp, function(fd){
+    clearBannerMedia();
+    var vid=document.createElement('video'); vid.className='hero-bg-video'; vid.src=fd;
+    vid.autoplay=true; vid.loop=true; vid.muted=true; vid.playsInline=true;
+    document.getElementById('heroBanner').insertBefore(vid, document.getElementById('heroOverlay'));
+    showToast('✅ Banner video updated!');
+  });
+}
+function clearBannerMedia(){ document.querySelectorAll('.hero-bg,.hero-bg-video').forEach(function(el){el.remove();}); }
+function clearBanner(){ clearBannerMedia(); showToast('Banner media removed.'); }
+function updateLogo(inp){
+  readFile(inp, function(fd){
+    ['navLogo','heroLogo','loginLogo'].forEach(function(id){document.getElementById(id).src=fd;});
+    showToast('✅ Logo updated!');
+  });
+}
+
+// ═══════════ BULLY ═══════════
+function openBullyModal(){ document.getElementById('bullyModal').classList.add('open'); document.getElementById('bullyDate').valueAsDate=new Date(); }
+function closeBullyModal(){ document.getElementById('bullyModal').classList.remove('open'); }
+function submitBullyReport(){
+  var d=document.getElementById('bullyDesc').value.trim();
+  if(!d){showToast('⚠️ Describe the incident.'); return;}
+  var record = {date:document.getElementById('bullyDate').value,type:document.getElementById('bullyType').value,location:document.getElementById('bullyLocation').value,reporter:document.getElementById('bullyName').value||'Anonymous',desc:d,status:'Under Review'};
+  S.bullyReports.push(record);
+  if(window.fbAddRecord) fbAddRecord('bullyReports', record);
+  closeBullyModal(); showToast('✅ Report submitted.');
+  document.getElementById('bullyDesc').value=''; document.getElementById('bullyName').value='';
+  renderAdminBully();
+}
+function renderAdminBully(){
+  var b=document.getElementById('adminBullyBody'); if(!b) return;
+  b.innerHTML = S.bullyReports.length===0
+    ? '<tr><td colspan="8" style="text-align:center;color:#aaa">No reports.</td></tr>'
+    : S.bullyReports.map(function(r,i){
+        return '<tr><td>'+(i+1)+'</td><td>'+r.date+'</td><td>'+esc(r.type)+'</td><td>'+esc(r.location)+'</td><td>'+esc(r.reporter)+'</td><td>'+esc(r.desc)+'</td><td><span class="status-badge status-'+(r.status==='Resolved'?'resolved':'pending')+'">'+r.status+'</span></td><td>'+(r.status!=='Resolved'?'<button class="btn btn-green btn-sm" onclick="markBullyResolved('+i+')">✅ Resolve</button>':'')+'</td></tr>';
+      }).join('');
+}
+function markBullyResolved(i){
+  S.bullyReports[i].status='Resolved';
+  if(window.fbUpdateRecord && S.bullyReports[i]._id) fbUpdateRecord('bullyReports', S.bullyReports[i]._id, {status:'Resolved'});
+  renderAdminBully();
+}
+
+// ═══════════ EDIT CONTENT ═══════════
+function loadEditFields(){
+  document.getElementById('editSubtitle').value=document.getElementById('heroSubtitle').textContent;
+  document.getElementById('editStudents').value=document.getElementById('statStudents').textContent;
+  document.getElementById('editFaculty').value=document.getElementById('statFaculty').textContent;
+  document.getElementById('editRooms').value=document.getElementById('statRooms').textContent;
+  document.getElementById('editAwards').value=document.getElementById('statAwards').textContent;
+  document.getElementById('editMission').value=document.getElementById('txtMission').textContent;
+  document.getElementById('editVision').value=document.getElementById('txtVision').textContent;
+  document.getElementById('editHistory').value=document.getElementById('txtHistory').textContent;
+  document.getElementById('editContact').value=document.getElementById('txtContact').innerHTML.replace(/<br>/g,'\n');
+  document.getElementById('editHours').value=document.getElementById('txtHours').innerHTML.replace(/<br>/g,'\n');
+  renderNewsAdminList();
+}
+function saveStats(){
+  document.getElementById('heroSubtitle').textContent=document.getElementById('editSubtitle').value;
+  document.getElementById('statStudents').textContent=document.getElementById('editStudents').value;
+  document.getElementById('statFaculty').textContent=document.getElementById('editFaculty').value;
+  document.getElementById('statRooms').textContent=document.getElementById('editRooms').value;
+  document.getElementById('statAwards').textContent=document.getElementById('editAwards').value;
+  showToast('✅ Stats saved!');
+}
+function saveAbout(){
+  document.getElementById('txtMission').textContent=document.getElementById('editMission').value;
+  document.getElementById('txtVision').textContent=document.getElementById('editVision').value;
+  document.getElementById('txtHistory').textContent=document.getElementById('editHistory').value;
+  document.getElementById('txtContact').innerHTML=document.getElementById('editContact').value.replace(/\n/g,'<br>');
+  document.getElementById('txtHours').innerHTML=document.getElementById('editHours').value.replace(/\n/g,'<br>');
+  showToast('✅ About page saved!');
+}
+function renderNewsAdminList(){
+  document.getElementById('newsAdminList').innerHTML = newsData.map(function(n,i){
+    return '<div class="news-admin-item"><div class="ni-info"><b>'+esc(n.icon)+' '+esc(n.title)+'</b><p>'+renderTag(n.type)+' — '+n.date+'</p></div><button class="btn btn-sm" style="background:#fee2e2;color:#991b1b;flex-shrink:0" onclick="deleteNews('+i+')">🗑</button></div>';
+  }).join('');
+}
+function deleteNews(i){ newsData.splice(i,1); refreshNews(); renderNewsAdminList(); showToast('Deleted.'); if(window.fbSaveNews) fbSaveNews(); }
+function openAddNewsModal(){ document.getElementById('addNewsModal').classList.add('open'); }
+function addNewsItem(){
+  var t=document.getElementById('newNewsTitle').value.trim(), d=document.getElementById('newNewsDesc').value.trim();
+  if(!t||!d){showToast('⚠️ Title and description required.'); return;}
+  newsData.unshift({type:document.getElementById('newNewsType').value,icon:document.getElementById('newNewsIcon').value||'📣',title:t,desc:d,date:document.getElementById('newNewsDate').value||todayStr()});
+  refreshNews(); renderNewsAdminList();
+  document.getElementById('addNewsModal').classList.remove('open');
+  document.getElementById('newNewsTitle').value=''; document.getElementById('newNewsDesc').value='';
+  showToast('✅ News added!');
+  if(window.fbSaveNews) fbSaveNews();
+}
+
+// ═══════════ MANAGE TEACHERS ═══════════
+function addTeacher(){
+  var name=document.getElementById('newTName').value.trim(), dept=document.getElementById('newTDept').value.trim();
+  var user=document.getElementById('newTUser').value.trim(), pass=document.getElementById('newTPass').value;
+  if(!name||!user||!pass){showToast('⚠️ Name, Username, Password required.'); return;}
+  if(S.teacherAccounts.find(function(a){return a.user===user;})||user===S.adminCreds.user){showToast('⚠️ Username already exists.'); return;}
+  S.teacherAccounts.push({name:name,dept:dept,user:user,pass:pass});
+  document.getElementById('newTName').value=''; document.getElementById('newTDept').value='';
+  document.getElementById('newTUser').value=''; document.getElementById('newTPass').value='';
+  renderTeacherAccountsList(); showToast('✅ Account created for '+name+'!');
+  if(window.fbSaveState) fbSaveState();
+}
+function renderTeacherAccountsList(){
+  document.getElementById('teacherAccountsList').innerHTML = S.teacherAccounts.map(function(t,i){
+    var initials = t.name.split(' ').map(function(w){return w[0]||'';}).join('').substring(0,2).toUpperCase();
+    var delBtn = i>0 ? '<button class="btn btn-sm" style="background:#fee2e2;color:#991b1b" onclick="deleteTeacher('+i+')">🗑</button>' : '';
+    return '<div class="teacher-row"><div class="tr-avatar">'+initials+'</div><div class="tr-info"><b>'+esc(t.name)+'</b><span>'+(t.dept||'—')+' · User: <strong>'+esc(t.user)+'</strong></span></div>'+delBtn+'</div>';
+  }).join('');
+}
+function deleteTeacher(i){ if(confirm('Remove '+S.teacherAccounts[i].name+'?')){ S.teacherAccounts.splice(i,1); renderTeacherAccountsList(); if(window.fbSaveState) fbSaveState(); } }
+function saveAdminCreds(){
+  var u=document.getElementById('newAdminUser').value.trim();
+  var p=document.getElementById('newAdminPass').value, pc=document.getElementById('newAdminPassConfirm').value;
+  if(!u){showToast('⚠️ Username required.'); return;}
+  if(p&&p!==pc){showToast('⚠️ Passwords do not match.'); return;}
+  S.adminCreds.user=u; if(p) S.adminCreds.pass=p;
+  document.getElementById('newAdminPass').value=''; document.getElementById('newAdminPassConfirm').value='';
+  showToast('✅ Admin credentials updated!');
+  if(window.fbSaveState) fbSaveState();
+}
+
+// ═══════════ CHAT ═══════════
+function renderTeacherChat(){
+  if(!S.currentTeacherUser) return;
+  var msgs=S.chatMessages[S.currentTeacherUser]||[];
+  var box=document.getElementById('teacherChatMessages');
+  box.innerHTML = msgs.length===0
+    ? '<div style="text-align:center;color:#aaa;font-size:.8rem;margin-top:2rem">No messages yet. Say hello! 👋</div>'
+    : msgs.map(function(m){
+        return '<div class="msg '+(m.sender==='teacher'?'me':'other')+'"><div>'+esc(m.text)+'</div><div class="msg-meta">'+(m.sender==='teacher'?'You':'Admin')+' · '+m.time+'</div></div>';
+      }).join('');
+  box.scrollTop=box.scrollHeight;
+}
+function sendTeacherMsg(){
+  var inp=document.getElementById('teacherChatInput'), txt=inp.value.trim(); if(!txt) return;
+  if(!S.chatMessages[S.currentTeacherUser]) S.chatMessages[S.currentTeacherUser]=[];
+  S.chatMessages[S.currentTeacherUser].push({sender:'teacher',text:txt,time:now()});
+  inp.value=''; renderTeacherChat();
+  S.adminUnread[S.currentTeacherUser]=(S.adminUnread[S.currentTeacherUser]||0)+1;
+  updateAdminUnreadBadge();
+  if(S.adminSelectedThread===S.currentTeacherUser) renderAdminChat(S.currentTeacherUser);
+  if(window.fbSaveChat) fbSaveChat(S.currentTeacherUser);
+}
+function renderAdminChatThreads(){
+  var box=document.getElementById('adminChatThreads');
+  if(S.teacherAccounts.length===0){box.innerHTML='<div style="padding:1rem;font-size:.8rem;color:#aaa">No teacher accounts.</div>'; return;}
+  box.innerHTML = S.teacherAccounts.map(function(t){
+    var msgs=S.chatMessages[t.user]||[];
+    var last=msgs.length?msgs[msgs.length-1].text:'No messages yet';
+    var unread=S.adminUnread[t.user]||0;
+    var initials=t.name.split(' ').map(function(w){return w[0]||'';}).join('').substring(0,2).toUpperCase();
+    return '<div class="chat-thread-item '+(S.adminSelectedThread===t.user?'active':'')+'" onclick="selectAdminThread(\''+esc(t.user)+'\',\''+esc(t.name)+'\')"><div class="chat-thread-avatar">'+initials+'</div><div class="chat-thread-info"><div class="tname">'+esc(t.name)+'</div><div class="tlast">'+esc(last)+'</div></div>'+(unread>0?'<div class="unread-badge">'+unread+'</div>':'')+'</div>';
+  }).join('');
+}
+function selectAdminThread(user,name){
+  S.adminSelectedThread=user; S.adminUnread[user]=0; updateAdminUnreadBadge();
+  if(!S.chatMessages[user]) S.chatMessages[user]=[];
+  document.getElementById('noChatSelected').style.display='none';
+  document.getElementById('adminChatWrap').style.display='flex';
+  document.getElementById('adminChatTeacherName').textContent=name;
+  renderAdminChat(user); renderAdminChatThreads();
+}
+function renderAdminChat(user){
+  var msgs=S.chatMessages[user]||[];
+  var box=document.getElementById('adminChatMessages');
+  box.innerHTML = msgs.length===0
+    ? '<div style="text-align:center;color:#aaa;font-size:.8rem;margin-top:2rem">No messages yet.</div>'
+    : msgs.map(function(m){
+        return '<div class="msg '+(m.sender==='admin'?'me':'other')+'"><div>'+esc(m.text)+'</div><div class="msg-meta">'+(m.sender==='admin'?'You (Admin)':esc(m.sender))+' · '+m.time+'</div></div>';
+      }).join('');
+  box.scrollTop=box.scrollHeight;
+}
+function sendAdminMsg(){
+  if(!S.adminSelectedThread) return;
+  var inp=document.getElementById('adminChatInput'), txt=inp.value.trim(); if(!txt) return;
+  if(!S.chatMessages[S.adminSelectedThread]) S.chatMessages[S.adminSelectedThread]=[];
+  S.chatMessages[S.adminSelectedThread].push({sender:'admin',text:txt,time:now()});
+  inp.value=''; renderAdminChat(S.adminSelectedThread); renderAdminChatThreads();
+  if(S.currentTeacherUser===S.adminSelectedThread) renderTeacherChat();
+  if(window.fbSaveChat) fbSaveChat(S.adminSelectedThread);
+}
+function updateAdminUnreadBadge(){
+  var total=Object.values(S.adminUnread).reduce(function(a,b){return a+b;},0);
+  var badge=document.getElementById('adminUnreadBadge');
+  if(badge){ badge.style.display=total>0?'inline':'none'; badge.textContent=total; }
+}
+</script>
+</body>
+</html>
